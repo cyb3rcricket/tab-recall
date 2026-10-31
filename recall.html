@@ -4,18 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SecondShelf - Your Personal Web Shelf</title>
-    <script>
-      document.documentElement.setAttribute('data-theme', 'night');
-
-      try {
-        chrome.storage.local.get(['theme'], (items) => {
-          const theme = items?.theme === 'day' ? 'day' : 'night';
-          document.documentElement.setAttribute('data-theme', theme);
-        });
-      } catch {
-        document.documentElement.setAttribute('data-theme', 'night');
-      }
-    </script>
+    <script src="theme-init.js"></script>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -23,7 +12,7 @@
       <header class="hero">
         <div class="hero-copy">
           <img class="hero-logo" src="img/logo.png" alt="SecondShelf logo" />
-          <p class="eyebrow">SecondShelf: Your Personal Web Shelf</p>
+          <h1 class="eyebrow">SecondShelf: Your Personal Web Shelf</h1>
           <p class="hero-text">
             Stash pages before they vanish, then search and pull them back up at anytime from your private, local dashboard.
           </p>

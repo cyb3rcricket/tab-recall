@@ -46,6 +46,7 @@ const elements = {
 document.addEventListener('DOMContentLoaded', () => {
   void initializeTheme();
   bindEvents();
+  bindStorageSync();
   void loadLibrary();
 });
 
@@ -179,36 +180,10 @@ async function commitPageRename(page) {
   render();
 
   try {
-    await renamePageLocally(page.id, nextTitle);
-    showStatus('Saved page renamed.', false);
-    await loadLibrary();
-  } catch (error) {
-    console.error('Failed to rename saved page:', error);
-    showStatus('Failed to rename saved page. Try again.', true);
+    await performBackgroundAction({ type: 'RENAME_PAGE', pageId: page.id, newTitle: nextTitle });
   } finally {
     state.renamingPagePendingId = null;
   }
-}
-
-async function renamePageLocally(pageId, newTitle) {
-  const { [STORAGE_KEYS.pages]: existingPages = [] } = await storageGet([STORAGE_KEYS.pages]);
-  const nextPages = existingPages.map((page) => {
-    if (page.id !== pageId) {
-      return page;
-    }
-
-    return {
-      ...page,
-      title: newTitle
-    };
-  });
-
-  const didChange = nextPages.some((page, index) => page !== existingPages[index]);
-  if (!didChange) {
-    throw new Error('Saved page not found');
-  }
-
-  await storageSet({ [STORAGE_KEYS.pages]: nextPages });
 }
 
 async function deleteSession(sessionId) {
@@ -267,39 +242,16 @@ async function commitSessionRename(session) {
   render();
 
   try {
-    await renameSessionLocally(session.id, nextName);
-    showStatus('Session renamed.', false);
-    await loadLibrary();
-  } catch (error) {
-    console.error('Failed to rename session:', error);
-    showStatus('Failed to rename session. Try again.', true);
+    await performBackgroundAction({ type: 'RENAME_SESSION', sessionId: session.id, newName: nextName });
   } finally {
     state.renamingSessionPendingId = null;
   }
 }
 
-async function renameSessionLocally(sessionId, newName) {
-  const { [STORAGE_KEYS.sessions]: existingSessions = [] } = await storageGet([STORAGE_KEYS.sessions]);
-  const nextSessions = existingSessions.map((session) => {
-    if (session.id !== sessionId) {
-      return session;
-    }
-
-    return {
-      ...session,
-      name: newName
-    };
-  });
-
-  const didChange = nextSessions.some((session, index) => session !== existingSessions[index]);
-  if (!didChange) {
-    throw new Error('Session not found');
-  }
-
-  await storageSet({ [STORAGE_KEYS.sessions]: nextSessions });
-}
+let libraryLoadId = 0;
 
 async function loadLibrary() {
+  const loadId = ++libraryLoadId;
   setLoading(true);
 
   try {
@@ -308,16 +260,58 @@ async function loadLibrary() {
       STORAGE_KEYS.sessions
     ]);
 
+    if (loadId !== libraryLoadId) {
+      return;
+    }
+
     state.pages = Array.isArray(pages) ? pages : [];
     state.sessions = Array.isArray(sessions) ? sessions : [];
     applySearch();
   } catch (error) {
     console.error('Failed to load SecondShelf library:', error);
-    showStatus('Failed to load your saved pages. Try reloading this tab.', true);
+    if (loadId === libraryLoadId) {
+      showStatus('Failed to load your saved pages. Try reloading this tab.', true);
+    }
   } finally {
+    if (loadId !== libraryLoadId) {
+      return;
+    }
+
     setLoading(false);
     render();
   }
+}
+
+function bindStorageSync() {
+  if (!chrome.storage?.onChanged) {
+    return;
+  }
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') {
+      return;
+    }
+
+    if (changes[STORAGE_KEYS.theme] && changes[STORAGE_KEYS.theme].newValue !== state.theme) {
+      applyTheme(changes[STORAGE_KEYS.theme].newValue);
+    }
+
+    const libraryChanged = changes[STORAGE_KEYS.pages] || changes[STORAGE_KEYS.sessions];
+    if (!libraryChanged) {
+      return;
+    }
+
+    if (
+      state.renamingPageId ||
+      state.renamingSessionId ||
+      state.renamingPagePendingId ||
+      state.renamingSessionPendingId
+    ) {
+      return;
+    }
+
+    void loadLibrary();
+  });
 }
 
 async function performBackgroundAction(message) {
@@ -376,8 +370,8 @@ function scorePage(query, page) {
     return 1;
   }
 
-  const queryTokens = query.split(' ').filter(Boolean);
-  const fieldWords = combined.split(/[^a-z0-9]+/).filter(Boolean).slice(0, 160);
+  const queryTokens = query.split(' ').filter(Boolean).slice(0, 8);
+  const fieldWords = combined.split(/[^\p{L}\p{N}]+/u).filter(Boolean).slice(0, 40);
 
   if (queryTokens.length === 0 || fieldWords.length === 0) {
     return 0;
@@ -385,7 +379,8 @@ function scorePage(query, page) {
 
   let total = 0;
 
-  for (const token of queryTokens) {
+  for (let index = 0; index < queryTokens.length; index += 1) {
+    const token = queryTokens[index];
     let best = 0;
 
     for (const word of fieldWords) {
@@ -402,9 +397,16 @@ function scorePage(query, page) {
       const subsequence = subsequenceSimilarity(token, word);
       const editSimilarity = normalizedEditSimilarity(token, word);
       best = Math.max(best, subsequence, editSimilarity);
+      if (best >= 0.92) {
+        break;
+      }
     }
 
     total += best;
+    const remaining = queryTokens.length - index - 1;
+    if ((total + remaining) / queryTokens.length < 0.4) {
+      return total / queryTokens.length;
+    }
   }
 
   return total / queryTokens.length;
@@ -461,25 +463,13 @@ function renderPages() {
     const card = document.createElement('article');
     card.className = 'saved-card';
     const isRenaming = state.renamingPageId === page.id;
-    card.tabIndex = isRenaming ? -1 : 0;
-    card.setAttribute('role', 'button');
-    card.setAttribute('aria-label', `Open ${page.title}`);
-    card.addEventListener('click', () => {
-      if (isRenaming) {
+    card.addEventListener('click', (event) => {
+      const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+      if (isRenaming || !target || target.closest('button, input, a')) {
         return;
       }
 
       openPage(page.url);
-    });
-    card.addEventListener('keydown', (event) => {
-      if (isRenaming) {
-        return;
-      }
-
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        openPage(page.url);
-      }
     });
 
     const thumbnailMarkup = page.thumbnail
@@ -512,14 +502,25 @@ function renderPages() {
             data-page-rename-input="${page.id}"
             maxlength="160"
           />`
-        : `<h3>${escapeHtml(page.title || 'Untitled page')}</h3>`}
+        : `<h3><button class="card-open" type="button">${escapeHtml(page.title || 'Untitled page')}</button></h3>`}
       ${thumbnailMarkup}
       <p class="card-url">${escapeHtml(page.url)}</p>
       <p class="card-snippet">${escapeHtml(page.snippet || 'No preview text captured for this page.')}</p>
     `;
 
+    const openButton = card.querySelector('.card-open');
+    if (openButton) {
+      openButton.addEventListener('click', (event) => {
+        event.stopPropagation();
+        openPage(page.url);
+      });
+    }
+
     const renameButton = card.querySelector('.rename-button');
     if (renameButton) {
+      renameButton.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+      });
       renameButton.addEventListener('click', async (event) => {
         event.stopPropagation();
 
@@ -533,6 +534,9 @@ function renderPages() {
     }
 
     const deleteButton = card.querySelector('.delete-button');
+    deleteButton.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+    });
     deleteButton.addEventListener('click', async (event) => {
       event.stopPropagation();
       await deletePage(page.id);
@@ -569,12 +573,14 @@ function renderPages() {
         }
       });
 
-      renameInput.addEventListener('blur', async () => {
-        if (state.renamingPageId !== page.id) {
-          return;
-        }
+      renameInput.addEventListener('blur', () => {
+        window.setTimeout(() => {
+          if (state.renamingPageId !== page.id || state.renamingPagePendingId === page.id) {
+            return;
+          }
 
-        await commitPageRename(page);
+          void commitPageRename(page);
+        }, 0);
       });
     }
 
@@ -599,30 +605,19 @@ function renderSessions() {
     const card = document.createElement('article');
     card.className = 'session-card';
     const isRenaming = state.renamingSessionId === session.id;
-    card.tabIndex = isRenaming ? -1 : 0;
-    card.setAttribute('role', 'button');
-    card.setAttribute('aria-label', `Restore ${session.name || 'saved session'}`);
-    card.addEventListener('click', () => {
-      if (isRenaming) {
+    const items = Array.isArray(session.items) ? session.items : [];
+    card.addEventListener('click', (event) => {
+      const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+      if (isRenaming || !target || target.closest('button, input, a')) {
         return;
       }
 
       restoreSession(session);
     });
-    card.addEventListener('keydown', (event) => {
-      if (isRenaming) {
-        return;
-      }
 
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        restoreSession(session);
-      }
-    });
-
-    const topDomains = session.items
+    const topDomains = items
       .slice(0, 3)
-      .map((item) => getDomain(item.url))
+      .map((item) => getDomain(item?.url))
       .join(' • ');
 
     card.innerHTML = `
@@ -637,10 +632,10 @@ function renderSessions() {
                 data-session-rename-input="${session.id}"
                 maxlength="120"
               />`
-            : `<strong>${escapeHtml(session.name || 'Quick session')}</strong>`}
+            : `<button class="session-open" type="button">${escapeHtml(session.name || 'Quick session')}</button>`}
         </div>
         <div class="card-actions">
-          <span>${session.count || session.items.length} tabs</span>
+          <span>${session.count || items.length} tabs</span>
           <div class="action-button-stack">
             <button class="delete-button" type="button" aria-label="Delete saved session group">
               <img src="icons/trash.svg" class="delete-icon" alt="" />
@@ -657,7 +652,18 @@ function renderSessions() {
       <time>${formatDateTime(session.createdAt)}</time>
     `;
 
+    const openButton = card.querySelector('.session-open');
+    if (openButton) {
+      openButton.addEventListener('click', (event) => {
+        event.stopPropagation();
+        restoreSession(session);
+      });
+    }
+
     const deleteButton = card.querySelector('.delete-button');
+    deleteButton.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+    });
     deleteButton.addEventListener('click', async (event) => {
       event.stopPropagation();
       await deleteSession(session.id);
@@ -671,6 +677,9 @@ function renderSessions() {
 
     const renameButton = card.querySelector('.rename-button');
     if (renameButton) {
+      renameButton.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+      });
       renameButton.addEventListener('click', async (event) => {
         event.stopPropagation();
 
@@ -708,12 +717,14 @@ function renderSessions() {
         }
       });
 
-      renameInput.addEventListener('blur', async () => {
-        if (state.renamingSessionId !== session.id) {
-          return;
-        }
+      renameInput.addEventListener('blur', () => {
+        window.setTimeout(() => {
+          if (state.renamingSessionId !== session.id || state.renamingSessionPendingId === session.id) {
+            return;
+          }
 
-        await commitSessionRename(session);
+          void commitSessionRename(session);
+        }, 0);
       });
     }
 
@@ -724,15 +735,36 @@ function renderSessions() {
 }
 
 async function restoreSession(session) {
-  try {
-    for (const item of session.items) {
-      await createTab({ url: item.url, active: false });
+  const items = Array.isArray(session.items) ? session.items : [];
+  let opened = 0;
+  let failed = 0;
+
+  for (const item of items) {
+    if (!isSavableUrl(item?.url)) {
+      failed += 1;
+      continue;
     }
-    showStatus(`Restored ${session.items.length} tabs.`, false);
-  } catch (error) {
-    console.error('Failed to restore session:', error);
-    showStatus('Failed to restore one or more tabs.', true);
+
+    try {
+      await createTab({ url: item.url, active: false });
+      opened += 1;
+    } catch (error) {
+      console.error('Failed to restore session tab:', error);
+      failed += 1;
+    }
   }
+
+  if (opened === 0 && failed === 0) {
+    showStatus('That session has no tabs to restore.', true);
+    return;
+  }
+
+  if (failed > 0) {
+    showStatus(`Restored ${opened} tab${opened === 1 ? '' : 's'}. ${failed} could not be opened.`, true);
+    return;
+  }
+
+  showStatus(`Restored ${opened} tab${opened === 1 ? '' : 's'}.`, false);
 }
 
 async function openPage(url) {
@@ -820,7 +852,7 @@ function normalizedEditSimilarity(query, word) {
     return 0;
   }
 
-  if (Math.abs(query.length - word.length) > 4) {
+  if (query.length > 24 || word.length > 24 || Math.abs(query.length - word.length) > 4) {
     return 0;
   }
 
@@ -882,6 +914,10 @@ function formatDateTime(isoString) {
     dateStyle: 'medium',
     timeStyle: 'short'
   }).format(date);
+}
+
+function isSavableUrl(url) {
+  return typeof url === 'string' && /^https?:\/\//i.test(url);
 }
 
 function getDomain(url) {

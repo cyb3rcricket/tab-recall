@@ -8,6 +8,7 @@
       :root {
         color-scheme: light dark;
         --bg: #f6f9fc;
+        --bg-end: #eef3f8;
         --surface: rgba(255, 255, 255, 0.86);
         --border: rgba(76, 109, 143, 0.16);
         --text: #16263c;
@@ -19,6 +20,7 @@
       @media (prefers-color-scheme: dark) {
         :root {
           --bg: #08111b;
+          --bg-end: #08111b;
           --surface: rgba(10, 22, 35, 0.9);
           --border: rgba(128, 159, 194, 0.14);
           --text: #eef5ff;
@@ -40,7 +42,7 @@
         padding: 24px;
         background:
           radial-gradient(circle at top left, rgba(96, 165, 250, 0.18), transparent 30%),
-          linear-gradient(180deg, var(--bg) 0%, #eef3f8 100%);
+          linear-gradient(180deg, var(--bg) 0%, var(--bg-end) 100%);
         color: var(--text);
         font-family: "Avenir Next", "Segoe UI", "Helvetica Neue", Helvetica, sans-serif;
       }

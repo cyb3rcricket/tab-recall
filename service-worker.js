@@ -5,12 +5,13 @@ const STORAGE_KEYS = {
 
 const PAGE_LIMIT = 500;
 const CONTEXT_MENU_ID = 'tabrecall-save-page';
-const CONTEXT_MENU_IDS = ['tabrecall-save-page', 'secondshelf-save-page'];
 const RECALL_URL = 'recall.html';
 const THUMBNAIL_MAX_WIDTH = 320;
 const THUMBNAIL_MAX_HEIGHT = 200;
+const THUMBNAIL_DATA_URL_LIMIT = 120000;
 
-void setupContextMenus();
+let mutationQueue = Promise.resolve();
+let menuQueue = Promise.resolve();
 
 chrome.runtime.onInstalled.addListener(() => {
   void setupContextMenus();
@@ -21,11 +22,22 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
-  if (!CONTEXT_MENU_IDS.includes(String(info.menuItemId)) || !tab?.id) {
+  if (String(info.menuItemId) !== CONTEXT_MENU_ID) {
     return;
   }
 
-  void savePageFromTabId(tab.id)
+  const linkUrl = typeof info.linkUrl === 'string' ? info.linkUrl : '';
+  const task = isSavableUrl(linkUrl)
+    ? () => saveLinkedUrl(linkUrl, info.selectionText)
+    : () => {
+        if (!tab?.id) {
+          return { ok: false, message: 'This page cannot be saved.' };
+        }
+
+        return savePageFromTabId(tab.id);
+      };
+
+  void enqueueMutation(task)
     .then((result) => {
       if (!result.ok) {
         console.warn('SecondShelf save failed:', result.message);
@@ -38,8 +50,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 
 chrome.action.onClicked.addListener(async () => {
   try {
-    const recallPageUrl = chrome.runtime.getURL(RECALL_URL);
-    const existing = await queryTabs({ url: recallPageUrl });
+    const existing = await findDashboardTabs();
 
     if (existing.length > 0) {
       const [tab] = existing;
@@ -50,7 +61,7 @@ chrome.action.onClicked.addListener(async () => {
       return;
     }
 
-    await createTab({ url: recallPageUrl });
+    await createTab({ url: chrome.runtime.getURL(RECALL_URL) });
   } catch (error) {
     console.error('Failed to focus recall page:', error);
   }
@@ -74,24 +85,46 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 async function handleMessage(message) {
   switch (message.type) {
     case 'SAVE_CURRENT_TAB':
-      return saveMostRecentSavableTab();
+      return enqueueMutation(() => saveMostRecentSavableTab());
     case 'SAVE_ALL_OPEN_TABS':
-      return saveOpenTabsAsSession();
+      return enqueueMutation(() => saveOpenTabsAsSession());
     case 'DELETE_PAGE':
-      return deletePageById(message.pageId);
+      return enqueueMutation(() => deletePageById(message.pageId));
     case 'DELETE_SESSION':
-      return deleteSessionById(message.sessionId);
+      return enqueueMutation(() => deleteSessionById(message.sessionId));
+    case 'RENAME_PAGE':
+      return enqueueMutation(() => renamePageById(message.pageId, message.newTitle));
     case 'RENAME_SESSION':
-      return renameSessionById(message.sessionId, message.newName);
+      return enqueueMutation(() => renameSessionById(message.sessionId, message.newName));
     case 'CLEAR_ALL':
-      await storageSet({ [STORAGE_KEYS.pages]: [], [STORAGE_KEYS.sessions]: [] });
-      return { ok: true, message: 'Everything was cleared.' };
+      return enqueueMutation(async () => {
+        await storageSet({ [STORAGE_KEYS.pages]: [], [STORAGE_KEYS.sessions]: [] });
+        return { ok: true, message: 'Everything was cleared.' };
+      });
     default:
       return { ok: false, message: 'Unsupported action.' };
   }
 }
 
-async function setupContextMenus() {
+function enqueueMutation(task) {
+  const result = mutationQueue.then(() => task());
+  mutationQueue = result.then(
+    () => undefined,
+    () => undefined
+  );
+  return result;
+}
+
+function setupContextMenus() {
+  const run = menuQueue.then(() => createSaveMenu(), () => createSaveMenu());
+  menuQueue = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
+async function createSaveMenu() {
   try {
     await removeAllContextMenus();
     await createContextMenu({
@@ -104,11 +137,29 @@ async function setupContextMenus() {
   }
 }
 
+async function findDashboardTabs() {
+  const recallPageUrl = chrome.runtime.getURL(RECALL_URL);
+  const extensionTabs = await queryTabs({ url: recallPageUrl });
+
+  try {
+    const newTabs = await queryTabs({ url: 'chrome://newtab/*' });
+    return [...extensionTabs, ...newTabs];
+  } catch (error) {
+    console.debug('New tab lookup unavailable:', error);
+    return extensionTabs;
+  }
+}
+
 async function saveMostRecentSavableTab() {
   try {
     const tabs = await queryTabs({ currentWindow: true });
+    const activeTab = tabs.find((tab) => tab.active && typeof tab.id === 'number' && isSavableUrl(tab.url));
+    if (activeTab?.id) {
+      return savePageFromTabId(activeTab.id);
+    }
+
     const candidate = tabs
-      .filter((tab) => typeof tab.id === 'number' && isSavableUrl(tab.url))
+      .filter((tab) => !tab.active && typeof tab.id === 'number' && isSavableUrl(tab.url))
       .sort((left, right) => (right.lastAccessed ?? 0) - (left.lastAccessed ?? 0))[0];
 
     if (!candidate?.id) {
@@ -136,7 +187,8 @@ async function saveOpenTabsAsSession() {
       return { ok: false, message: 'No regular web pages are open to save.' };
     }
 
-    const { [STORAGE_KEYS.sessions]: existingSessions = [] } = await storageGet([STORAGE_KEYS.sessions]);
+    const storedSessions = await storageGet([STORAGE_KEYS.sessions]);
+    const existingSessions = asArray(storedSessions[STORAGE_KEYS.sessions]);
     const session = {
       id: createId('session'),
       name: `Quick session ${new Date().toLocaleString()}`,
@@ -167,13 +219,10 @@ async function savePageFromTabId(tabId) {
       return { ok: false, message: 'This page cannot be saved.' };
     }
 
-    // Capture page text and a lightweight visible-area preview in parallel.
-    const [snippet, thumbnail] = await Promise.all([
-      getSnippetFromTab(tabId),
-      captureVisibleTabThumbnail(tab)
-    ]);
+    const snippet = await getSnippetFromTab(tabId);
+    const thumbnail = await captureVisibleTabThumbnail(tab);
 
-    const page = {
+    return persistPage({
       id: createId('page'),
       title: cleanTitle(tab.title),
       url: tab.url,
@@ -181,10 +230,33 @@ async function savePageFromTabId(tabId) {
       snippet,
       thumbnail,
       savedAt: new Date().toISOString()
-    };
+    });
+  } catch (error) {
+    console.error('Failed to save page from tab:', error);
+    return { ok: false, message: 'Failed to save. Try again.' };
+  }
+}
 
-    const { [STORAGE_KEYS.pages]: existingPages = [] } = await storageGet([STORAGE_KEYS.pages]);
-    const existingIndex = existingPages.findIndex((item) => item.url === page.url);
+async function saveLinkedUrl(url, selectionText) {
+  const selected = typeof selectionText === 'string' ? selectionText.replace(/\s+/g, ' ').trim() : '';
+  const title = (selected || getDomain(url)).slice(0, 160);
+
+  return persistPage({
+    id: createId('page'),
+    title,
+    url,
+    domain: getDomain(url),
+    snippet: '',
+    thumbnail: '',
+    savedAt: new Date().toISOString()
+  });
+}
+
+async function persistPage(page) {
+  try {
+    const storedPages = await storageGet([STORAGE_KEYS.pages]);
+    const existingPages = asArray(storedPages[STORAGE_KEYS.pages]);
+    const existingIndex = existingPages.findIndex((item) => item && item.url === page.url);
     const withinLimit = existingPages.length < PAGE_LIMIT;
 
     if (existingIndex === -1 && !withinLimit) {
@@ -238,8 +310,9 @@ async function deletePageById(pageId) {
   }
 
   try {
-    const { [STORAGE_KEYS.pages]: existingPages = [] } = await storageGet([STORAGE_KEYS.pages]);
-    const updatedPages = existingPages.filter((page) => page.id !== pageId);
+    const storedPages = await storageGet([STORAGE_KEYS.pages]);
+    const existingPages = asArray(storedPages[STORAGE_KEYS.pages]);
+    const updatedPages = existingPages.filter((page) => page && page.id !== pageId);
 
     if (updatedPages.length === existingPages.length) {
       return { ok: false, message: 'That saved page no longer exists.' };
@@ -259,8 +332,9 @@ async function deleteSessionById(sessionId) {
   }
 
   try {
-    const { [STORAGE_KEYS.sessions]: existingSessions = [] } = await storageGet([STORAGE_KEYS.sessions]);
-    const updatedSessions = existingSessions.filter((session) => session.id !== sessionId);
+    const storedSessions = await storageGet([STORAGE_KEYS.sessions]);
+    const existingSessions = asArray(storedSessions[STORAGE_KEYS.sessions]);
+    const updatedSessions = existingSessions.filter((session) => session && session.id !== sessionId);
 
     if (updatedSessions.length === existingSessions.length) {
       return { ok: false, message: 'That session group no longer exists.' };
@@ -274,25 +348,54 @@ async function deleteSessionById(sessionId) {
   }
 }
 
+async function renamePageById(pageId, newTitle) {
+  if (!pageId) {
+    return { ok: false, message: 'Saved page not specified.' };
+  }
+
+  const trimmedTitle = String(newTitle || '').trim().slice(0, 160);
+  if (!trimmedTitle) {
+    return { ok: false, message: 'Page title cannot be empty.' };
+  }
+
+  try {
+    const storedPages = await storageGet([STORAGE_KEYS.pages]);
+    const existingPages = asArray(storedPages[STORAGE_KEYS.pages]);
+    const index = existingPages.findIndex((page) => page && page.id === pageId);
+    if (index === -1) {
+      return { ok: false, message: 'That saved page no longer exists.' };
+    }
+
+    const updated = [...existingPages];
+    updated[index] = { ...updated[index], title: trimmedTitle };
+    await storageSet({ [STORAGE_KEYS.pages]: updated });
+    return { ok: true, message: 'Saved page renamed.' };
+  } catch (error) {
+    console.error('Failed to rename saved page:', error);
+    return { ok: false, message: 'Failed to rename saved page. Try again.' };
+  }
+}
+
 async function renameSessionById(sessionId, newName) {
   if (!sessionId) {
     return { ok: false, message: 'Session not specified.' };
   }
 
-  const trimmedName = String(newName || '').trim();
+  const trimmedName = String(newName || '').trim().slice(0, 120);
   if (!trimmedName) {
     return { ok: false, message: 'Session name cannot be empty.' };
   }
 
   try {
-    const { [STORAGE_KEYS.sessions]: existingSessions = [] } = await storageGet([STORAGE_KEYS.sessions]);
-    const idx = existingSessions.findIndex((s) => s.id === sessionId);
-    if (idx === -1) {
+    const storedSessions = await storageGet([STORAGE_KEYS.sessions]);
+    const existingSessions = asArray(storedSessions[STORAGE_KEYS.sessions]);
+    const index = existingSessions.findIndex((session) => session && session.id === sessionId);
+    if (index === -1) {
       return { ok: false, message: 'Session not found.' };
     }
 
     const updated = [...existingSessions];
-    updated[idx] = { ...updated[idx], name: trimmedName };
+    updated[index] = { ...updated[index], name: trimmedName };
 
     await storageSet({ [STORAGE_KEYS.sessions]: updated });
     return { ok: true, message: 'Session renamed.' };
@@ -316,50 +419,29 @@ async function getSnippetFromTab(tabId) {
 }
 
 async function captureVisibleTabThumbnail(tab) {
-  if (typeof tab?.windowId !== 'number' || typeof tab.id !== 'number') {
-    return '';
+  const fallback = tab?.favIconUrl || '';
+  if (typeof tab?.windowId !== 'number' || tab.active !== true) {
+    return fallback;
   }
 
-  const activeTabs = await queryTabs({ active: true, windowId: tab.windowId });
-  const currentActiveTab = activeTabs[0];
-  const shouldRestoreActiveTab = typeof currentActiveTab?.id === 'number' && currentActiveTab.id !== tab.id;
-
   try {
-    await updateWindow(tab.windowId, { focused: true });
-
-    if (shouldRestoreActiveTab) {
-      await updateTab(tab.id, { active: true });
-    }
-
-    await waitForTabSettled(tab.id, 1200);
-    await delay(250);
-
-    // Visible-area capture is enough for a quick library preview and keeps this flow fast.
     const dataUrl = await captureVisibleTab(tab.windowId, {
       format: 'jpeg',
       quality: 40
     });
 
     if (!dataUrl) {
-      return tab.favIconUrl || '';
+      return fallback;
     }
 
-    return await resizeThumbnailDataUrl(dataUrl);
+    return await resizeThumbnailDataUrl(dataUrl, fallback);
   } catch (error) {
     console.debug('Thumbnail capture unavailable for tab', tab.id, error);
-    return tab.favIconUrl || '';
-  } finally {
-    if (shouldRestoreActiveTab) {
-      try {
-        await updateTab(currentActiveTab.id, { active: true });
-      } catch (restoreError) {
-        console.debug('Failed to restore previously active tab after thumbnail capture.', restoreError);
-      }
-    }
+    return fallback;
   }
 }
 
-async function resizeThumbnailDataUrl(dataUrl) {
+async function resizeThumbnailDataUrl(dataUrl, fallback) {
   try {
     const response = await fetch(dataUrl);
     const blob = await response.blob();
@@ -376,30 +458,37 @@ async function resizeThumbnailDataUrl(dataUrl) {
 
     if (!context) {
       bitmap.close();
-      return dataUrl;
+      return fallback;
     }
 
     context.drawImage(bitmap, 0, 0, targetWidth, targetHeight);
     bitmap.close();
 
     const resizedBlob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.72 });
-    return await blobToDataUrl(resizedBlob);
+    const resizedUrl = await blobToDataUrl(resizedBlob);
+    if (resizedUrl.length > THUMBNAIL_DATA_URL_LIMIT) {
+      return fallback;
+    }
+
+    return resizedUrl;
   } catch (error) {
-    console.debug('Thumbnail resize failed, using original capture.', error);
-    return dataUrl;
+    console.debug('Thumbnail resize failed, skipping the full capture.', error);
+    return fallback;
   }
 }
 
 async function blobToDataUrl(blob) {
   const buffer = await blob.arrayBuffer();
   const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x4000;
   let binary = '';
 
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, index + chunkSize);
+    binary += String.fromCharCode.apply(null, Array.from(chunk));
   }
 
-  return `data:${blob.type};base64,${btoa(binary)}`;
+  return `data:${blob.type || 'image/jpeg'};base64,${btoa(binary)}`;
 }
 
 function isSavableUrl(url) {
@@ -423,50 +512,8 @@ function createId(prefix) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
-function delay(milliseconds) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, milliseconds);
-  });
-}
-
-function waitForTabSettled(tabId, timeoutMs) {
-  return new Promise((resolve) => {
-    let settled = false;
-
-    const finish = () => {
-      if (settled) {
-        return;
-      }
-
-      settled = true;
-      chrome.tabs.onUpdated.removeListener(handleUpdated);
-      clearTimeout(timeoutId);
-      resolve();
-    };
-
-    const handleUpdated = (updatedTabId, changeInfo) => {
-      if (updatedTabId !== tabId) {
-        return;
-      }
-
-      if (changeInfo.status === 'complete') {
-        finish();
-      }
-    };
-
-    const timeoutId = setTimeout(finish, timeoutMs);
-    chrome.tabs.onUpdated.addListener(handleUpdated);
-
-    void getTab(tabId)
-      .then((tab) => {
-        if (tab?.status === 'complete') {
-          finish();
-        }
-      })
-      .catch(() => {
-        finish();
-      });
-  });
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
 }
 
 function storageGet(keys) {

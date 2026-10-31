@@ -34,30 +34,46 @@ function collectVisibleText(root) {
     return '';
   }
 
-  const elements = root.querySelectorAll('p, h1, h2, h3, li, article, section, div, span');
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const parent = node.parentElement;
+      if (!parent || !isVisible(parent)) {
+        return NodeFilter.FILTER_REJECT;
+      }
+
+      const tag = parent.tagName;
+      if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'TEXTAREA') {
+        return NodeFilter.FILTER_REJECT;
+      }
+
+      return NodeFilter.FILTER_ACCEPT;
+    }
+  });
+
   const chunks = [];
+  let length = 0;
 
-  for (const element of elements) {
-    if (chunks.join(' ').length >= 600) {
-      break;
-    }
-
-    if (!isVisible(element)) {
-      continue;
-    }
-
-    const text = element.innerText?.trim();
-    if (!text || text.length < 20) {
+  while (walker.nextNode()) {
+    const text = walker.currentNode.textContent.replace(/\s+/g, ' ').trim();
+    if (text.length < 2) {
       continue;
     }
 
     chunks.push(text);
+    length += text.length + 1;
+    if (length >= 600) {
+      break;
+    }
   }
 
   return chunks.join(' ').replace(/\s+/g, ' ').trim();
 }
 
 function isVisible(element) {
+  if (typeof element.checkVisibility === 'function') {
+    return element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+  }
+
   const style = window.getComputedStyle(element);
   return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
 }
