@@ -27,6 +27,11 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   }
 
   const linkUrl = typeof info.linkUrl === 'string' ? info.linkUrl : '';
+  if (linkUrl && !isSavableUrl(linkUrl)) {
+    console.warn('SecondShelf: that link cannot be saved:', linkUrl);
+    return;
+  }
+
   const task = isSavableUrl(linkUrl)
     ? () => saveLinkedUrl(linkUrl, info.selectionText)
     : () => {
@@ -53,7 +58,12 @@ chrome.action.onClicked.addListener(async () => {
     const existing = await findDashboardTabs();
 
     if (existing.length > 0) {
-      const [tab] = existing;
+      const tab = pickPreferredDashboardTab(existing);
+      if (!tab?.id) {
+        await createTab({ url: chrome.runtime.getURL(RECALL_URL) });
+        return;
+      }
+
       await updateTab(tab.id, { active: true });
       if (typeof tab.windowId === 'number') {
         await updateWindow(tab.windowId, { focused: true });
@@ -139,15 +149,23 @@ async function createSaveMenu() {
 
 async function findDashboardTabs() {
   const recallPageUrl = chrome.runtime.getURL(RECALL_URL);
-  const extensionTabs = await queryTabs({ url: recallPageUrl });
+  const extensionTabs = await queryTabs({ url: recallPageUrl, currentWindow: true });
 
   try {
-    const newTabs = await queryTabs({ url: 'chrome://newtab/*' });
+    const newTabs = await queryTabs({ url: 'chrome://newtab/*', currentWindow: true });
     return [...extensionTabs, ...newTabs];
   } catch (error) {
     console.debug('New tab lookup unavailable:', error);
     return extensionTabs;
   }
+}
+
+function pickPreferredDashboardTab(tabs) {
+  if (!Array.isArray(tabs) || tabs.length === 0) {
+    return null;
+  }
+
+  return [...tabs].sort((left, right) => (right.lastAccessed ?? 0) - (left.lastAccessed ?? 0))[0];
 }
 
 async function saveMostRecentSavableTab() {
@@ -166,7 +184,15 @@ async function saveMostRecentSavableTab() {
       return { ok: false, message: 'No savable tab was found in this window.' };
     }
 
-    return savePageFromTabId(candidate.id);
+    const result = await savePageFromTabId(candidate.id);
+    if (!result.ok) {
+      return result;
+    }
+
+    return {
+      ...result,
+      message: `${result.message} (most recent web tab in this window)`
+    };
   } catch (error) {
     console.error('Failed to save most recent tab:', error);
     return { ok: false, message: 'Failed to save the current tab. Try again.' };
@@ -277,7 +303,7 @@ async function persistPage(page) {
         title: page.title || existingPage.title,
         domain: page.domain || existingPage.domain,
         snippet: page.snippet || existingPage.snippet,
-        thumbnail: page.thumbnail || existingPage.thumbnail || '',
+        thumbnail: page.thumbnail,
         savedAt: page.savedAt
       };
 

@@ -4,9 +4,11 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SecondShelf - Upgrade</title>
+    <script src="theme-init.js"></script>
     <style>
-      :root {
-        color-scheme: light dark;
+      :root,
+      html[data-theme='day'] {
+        color-scheme: light;
         --bg: #f6f9fc;
         --bg-end: #eef3f8;
         --surface: rgba(255, 255, 255, 0.86);
@@ -17,17 +19,16 @@
         --shadow: 0 22px 60px rgba(17, 24, 39, 0.14);
       }
 
-      @media (prefers-color-scheme: dark) {
-        :root {
-          --bg: #08111b;
-          --bg-end: #08111b;
-          --surface: rgba(10, 22, 35, 0.9);
-          --border: rgba(128, 159, 194, 0.14);
-          --text: #eef5ff;
-          --muted: #95a8bf;
-          --primary: #7cc0ff;
-          --shadow: 0 22px 60px rgba(0, 0, 0, 0.3);
-        }
+      html[data-theme='night'] {
+        color-scheme: dark;
+        --bg: #08111b;
+        --bg-end: #08111b;
+        --surface: rgba(10, 22, 35, 0.9);
+        --border: rgba(128, 159, 194, 0.14);
+        --text: #eef5ff;
+        --muted: #95a8bf;
+        --primary: #7cc0ff;
+        --shadow: 0 22px 60px rgba(0, 0, 0, 0.3);
       }
 
       * {

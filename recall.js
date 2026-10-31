@@ -6,6 +6,8 @@ const STORAGE_KEYS = {
 
 const PAGE_LIMIT = 500;
 const SEARCH_DEBOUNCE_MS = 300;
+const SESSION_RESTORE_CONFIRM_THRESHOLD = 20;
+const FUZZY_SEARCH_PAGE_CAP = 300;
 
 const state = {
   pages: [],
@@ -44,11 +46,24 @@ const elements = {
 };
 
 document.addEventListener('DOMContentLoaded', () => {
+  syncSaveCurrentTabLabel();
   void initializeTheme();
   bindEvents();
   bindStorageSync();
   void loadLibrary();
 });
+
+function syncSaveCurrentTabLabel() {
+  if (!elements.saveCurrentButton) {
+    return;
+  }
+
+  elements.saveCurrentButton.textContent = 'Save Recent Web Tab';
+  elements.saveCurrentButton.setAttribute(
+    'title',
+    'When this dashboard is the active tab, saves the most recently used http(s) tab in this window.'
+  );
+}
 
 function bindEvents() {
   elements.themeToggleInput.addEventListener('change', async (event) => {
@@ -154,6 +169,7 @@ function cancelPageRename() {
   state.renamingPageValue = '';
   state.renamingPagePendingId = null;
   render();
+  flushPendingLibraryRefresh();
 }
 
 async function commitPageRename(page) {
@@ -166,6 +182,14 @@ async function commitPageRename(page) {
 
   if (!nextTitle) {
     showStatus('Page title cannot be empty.', true);
+    state.renamingPageId = page.id;
+    state.renamingPageValue = currentTitle;
+    render();
+    window.requestAnimationFrame(() => {
+      const input = document.querySelector(`[data-page-rename-input="${page.id}"]`);
+      input?.focus();
+      input?.select();
+    });
     return;
   }
 
@@ -183,6 +207,7 @@ async function commitPageRename(page) {
     await performBackgroundAction({ type: 'RENAME_PAGE', pageId: page.id, newTitle: nextTitle });
   } finally {
     state.renamingPagePendingId = null;
+    flushPendingLibraryRefresh();
   }
 }
 
@@ -216,6 +241,7 @@ function cancelSessionRename() {
   state.renamingSessionValue = '';
   state.renamingSessionPendingId = null;
   render();
+  flushPendingLibraryRefresh();
 }
 
 async function commitSessionRename(session) {
@@ -228,6 +254,14 @@ async function commitSessionRename(session) {
 
   if (!nextName) {
     showStatus('Session name cannot be empty.', true);
+    state.renamingSessionId = session.id;
+    state.renamingSessionValue = currentName;
+    render();
+    window.requestAnimationFrame(() => {
+      const input = document.querySelector(`[data-session-rename-input="${session.id}"]`);
+      input?.focus();
+      input?.select();
+    });
     return;
   }
 
@@ -245,10 +279,13 @@ async function commitSessionRename(session) {
     await performBackgroundAction({ type: 'RENAME_SESSION', sessionId: session.id, newName: nextName });
   } finally {
     state.renamingSessionPendingId = null;
+    flushPendingLibraryRefresh();
   }
 }
 
 let libraryLoadId = 0;
+let loadLibraryTimeoutId = 0;
+let pendingLibraryRefresh = false;
 
 async function loadLibrary() {
   const loadId = ++libraryLoadId;
@@ -307,11 +344,29 @@ function bindStorageSync() {
       state.renamingPagePendingId ||
       state.renamingSessionPendingId
     ) {
+      pendingLibraryRefresh = true;
       return;
     }
 
-    void loadLibrary();
+    scheduleLoadLibrary();
   });
+}
+
+function scheduleLoadLibrary() {
+  window.clearTimeout(loadLibraryTimeoutId);
+  loadLibraryTimeoutId = window.setTimeout(() => {
+    loadLibraryTimeoutId = 0;
+    void loadLibrary();
+  }, 80);
+}
+
+function flushPendingLibraryRefresh() {
+  if (!pendingLibraryRefresh) {
+    return;
+  }
+
+  pendingLibraryRefresh = false;
+  scheduleLoadLibrary();
 }
 
 async function performBackgroundAction(message) {
@@ -329,7 +384,7 @@ async function performBackgroundAction(message) {
     }
 
     showStatus(result.message || 'Done.', false);
-    await loadLibrary();
+    scheduleLoadLibrary();
   } catch (error) {
     console.error('Background action failed:', error);
     showStatus('Failed to complete the action. Try again.', true);
@@ -345,7 +400,15 @@ function applySearch() {
   }
 
   const query = normalize(state.query);
-  const scored = state.pages
+  const exactMatches = state.pages.filter((page) => pageMatchesQuery(query, page, 1));
+  if (exactMatches.length > 0) {
+    state.filteredPages = exactMatches;
+    return;
+  }
+
+  const pagesToSearch =
+    state.pages.length > FUZZY_SEARCH_PAGE_CAP ? state.pages.slice(0, FUZZY_SEARCH_PAGE_CAP) : state.pages;
+  const scored = pagesToSearch
     .map((page) => ({
       page,
       score: scorePage(query, page)
@@ -354,6 +417,10 @@ function applySearch() {
     .sort((left, right) => right.score - left.score);
 
   state.filteredPages = scored.map((entry) => entry.page);
+}
+
+function pageMatchesQuery(query, page, minimumScore) {
+  return scorePage(query, page) >= minimumScore;
 }
 
 function scorePage(query, page) {
@@ -378,6 +445,7 @@ function scorePage(query, page) {
   }
 
   let total = 0;
+  const useEditDistance = queryTokens.some((token) => token.length >= 4);
 
   for (let index = 0; index < queryTokens.length; index += 1) {
     const token = queryTokens[index];
@@ -395,7 +463,7 @@ function scorePage(query, page) {
       }
 
       const subsequence = subsequenceSimilarity(token, word);
-      const editSimilarity = normalizedEditSimilarity(token, word);
+      const editSimilarity = useEditDistance ? normalizedEditSimilarity(token, word) : 0;
       best = Math.max(best, subsequence, editSimilarity);
       if (best >= 0.92) {
         break;
@@ -474,7 +542,7 @@ function renderPages() {
 
     const thumbnailMarkup = page.thumbnail
       ? `<img src="${escapeAttribute(page.thumbnail)}" alt="Page preview" class="card-thumbnail" />`
-      : '';
+      : '<div class="card-thumbnail-placeholder" aria-hidden="true"></div>';
 
     card.innerHTML = `
       <div class="card-top-row">
@@ -502,7 +570,7 @@ function renderPages() {
             data-page-rename-input="${page.id}"
             maxlength="160"
           />`
-        : `<h3><button class="card-open" type="button">${escapeHtml(page.title || 'Untitled page')}</button></h3>`}
+        : `<h3><button class="card-open" type="button" aria-label="Open ${escapeAttribute(page.title || 'Untitled page')}">${escapeHtml(page.title || 'Untitled page')}</button></h3>`}
       ${thumbnailMarkup}
       <p class="card-url">${escapeHtml(page.url)}</p>
       <p class="card-snippet">${escapeHtml(page.snippet || 'No preview text captured for this page.')}</p>
@@ -632,7 +700,7 @@ function renderSessions() {
                 data-session-rename-input="${session.id}"
                 maxlength="120"
               />`
-            : `<button class="session-open" type="button">${escapeHtml(session.name || 'Quick session')}</button>`}
+            : `<button class="session-open" type="button" aria-label="Restore ${escapeAttribute(session.name || 'Quick session')}">${escapeHtml(session.name || 'Quick session')}</button>`}
         </div>
         <div class="card-actions">
           <span>${session.count || items.length} tabs</span>
@@ -736,6 +804,17 @@ function renderSessions() {
 
 async function restoreSession(session) {
   const items = Array.isArray(session.items) ? session.items : [];
+  const restorableCount = items.filter((item) => isSavableUrl(item?.url)).length;
+
+  if (restorableCount > SESSION_RESTORE_CONFIRM_THRESHOLD) {
+    const confirmed = window.confirm(
+      `Restore ${restorableCount} tabs from this session? This will open many tabs at once.`
+    );
+    if (!confirmed) {
+      return;
+    }
+  }
+
   let opened = 0;
   let failed = 0;
 
@@ -768,6 +847,11 @@ async function restoreSession(session) {
 }
 
 async function openPage(url) {
+  if (!isSavableUrl(url)) {
+    showStatus('That saved page URL is no longer safe to open.', true);
+    return;
+  }
+
   try {
     await createTab({ url });
   } catch (error) {
