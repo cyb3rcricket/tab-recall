@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SecondShelf - Your Personal Web Shelf</title>
+    <script>
+      document.documentElement.setAttribute('data-theme', 'night');
+
+      try {
+        chrome.storage.local.get(['theme'], (items) => {
+          const theme = items?.theme === 'day' ? 'day' : 'night';
+          document.documentElement.setAttribute('data-theme', theme);
+        });
+      } catch {
+        document.documentElement.setAttribute('data-theme', 'night');
+      }
+    </script>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div class="hero-copy">
+          <img class="hero-logo" src="img/logo.png" alt="SecondShelf logo" />
+          <p class="eyebrow">SecondShelf: Your Personal Web Shelf</p>
+          <p class="hero-text">
+            Stash pages before they vanish, then search and pull them back up at anytime from your private, local dashboard.
+          </p>
+        </div>
+        <div class="hero-actions">
+          <div class="theme-toggle" aria-label="Theme toggle">
+            <span class="theme-toggle-caption" id="theme-toggle-caption">Theme</span>
+            <label class="theme-switch" for="theme-toggle-input">
+              <span class="theme-switch-label">Night</span>
+              <input
+                id="theme-toggle-input"
+                class="theme-switch-input"
+                type="checkbox"
+                role="switch"
+                aria-label="Toggle between night and day themes"
+                aria-describedby="theme-toggle-caption"
+              />
+              <span class="theme-switch-track" aria-hidden="true">
+                <span class="theme-switch-thumb"></span>
+              </span>
+              <span class="theme-switch-label">Day</span>
+            </label>
+          </div>
+          <button id="save-current-button" class="button button-primary" type="button">Save Current Tab</button>
+          <button id="save-session-button" class="button button-secondary" type="button">Save All Open Tabs as a Session</button>
+          <button id="clear-all-button" class="button button-danger" type="button">Clear All</button>
+        </div>
+      </header>
+
+      <section class="toolbar card-surface">
+        <label class="search-label" for="search-input">Search your saved pages</label>
+        <div class="search-row">
+          <input
+            id="search-input"
+            class="search-input"
+            type="search"
+            placeholder="Search titles, URLs, snippets..."
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <div id="search-status" class="search-status">0 results</div>
+        </div>
+        <div class="meta-row">
+          <div id="storage-summary" class="storage-summary">Loading your library...</div>
+          <a id="upgrade-link-inline" class="text-link hidden" href="upgrade.html">Upgrade info</a>
+        </div>
+      </section>
+
+      <section id="limit-banner" class="limit-banner hidden" aria-live="polite">
+        <div>
+          <strong>Free limit reached.</strong>
+          <span id="limit-message">You've reached the free limit of 500 saves. Consider upgrading for unlimited storage and pro features (coming soon).</span>
+        </div>
+        <a class="button button-primary banner-link" href="upgrade.html">See Upgrade Page</a>
+      </section>
+
+      <section id="status-banner" class="status-banner hidden" aria-live="polite"></section>
+
+      <main class="content-grid">
+        <section class="content-column">
+          <div class="section-header">
+            <h2>Saved Pages</h2>
+            <span id="pages-count" class="count-pill">0</span>
+          </div>
+
+          <div id="loading-state" class="loading-state">
+            <div class="spinner" aria-hidden="true"></div>
+            <p>Loading your saved pages...</p>
+          </div>
+
+          <div id="empty-state" class="empty-state hidden">
+            <h3>Nothing saved yet</h3>
+            <p>Right-click any page and choose Save to SecondShelf, or use the buttons above to start building your recall shelf.</p>
+          </div>
+
+          <div id="saved-pages-list" class="cards"></div>
+        </section>
+
+        <aside class="sidebar-column">
+          <div class="section-header">
+            <h2>Saved Sessions</h2>
+            <span id="sessions-count" class="count-pill">0</span>
+          </div>
+          <div id="sessions-empty-state" class="empty-side-state hidden">
+            <p>Your grouped tab sessions will appear here.</p>
+          </div>
+          <div id="session-groups-list" class="session-list"></div>
+        </aside>
+      </main>
+    </div>
+
+    <script src="recall.js"></script>
+  </body>
+</html>
