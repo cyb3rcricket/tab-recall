@@ -8,6 +8,8 @@
     "activeTab",
     "tabs",
     "contextMenus",
+    "notifications",
+    "scripting",
     "unlimitedStorage"
   ],
   "host_permissions": [
@@ -32,16 +34,5 @@
   "chrome_url_overrides": {
     "newtab": "recall.html"
   },
-  "incognito": "split",
-  "content_scripts": [
-    {
-      "matches": [
-        "<all_urls>"
-      ],
-      "js": [
-        "content-script.js"
-      ],
-      "run_at": "document_idle"
-    }
-  ]
+  "incognito": "split"
 }

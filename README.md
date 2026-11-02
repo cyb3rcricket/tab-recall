@@ -12,8 +12,8 @@ SecondShelf is a Chrome extension (Manifest V3) that turns your new-tab page int
 - **Save a link** — right-click a link to shelve it without opening it first; selected text becomes its title.
 - **Save a whole session** — one click stores all your open tabs as a named session group, and one click restores them later.
 - **Find it again** — each save captures the title, URL, domain, a short snippet of the page's visible text, and a small thumbnail screenshot, so your shelf is visual, not just a list of links.
-- **Typo-tolerant search** — search titles, URLs, and snippets with fuzzy matching (subsequence and edit-distance scoring), so you can find things the way you half-remember them.
-- **No duplicates** — re-saving a page you already shelved refreshes its title, snippet, thumbnail, and timestamp and moves it to the top instead of piling up copies.
+- **Typo-tolerant search** — search pages and sessions by title or URL, and pages by snippet, with close word matching.
+- **No duplicates** — re-saving a page moves it to the top and refreshes available page details without replacing its title or thumbnail with a link or favicon fallback.
 - **Make it yours** — rename or delete saved pages and sessions, switch between night and day themes, and see at a glance how much you've stored.
 
 Clicking the toolbar icon opens (or focuses) your shelf — saving happens from the right-click menu and the dashboard buttons.
@@ -24,7 +24,8 @@ SecondShelf is local-first by design:
 
 - Everything you save lives in your browser's local extension storage (`chrome.storage.local`) on your own device.
 - There is no account, no server, no ads, and no tracking. The extension makes no external network calls with your saved pages.
-- The broad host permission (`<all_urls>`) exists so the extension can read a page's visible text snippet and capture its thumbnail when *you* ask it to save that page.
+- The broad host permission (`<all_urls>`) supports snippet capture when saving a background tab from the shelf, and screenshot capture. The extension injects its snippet reader only when you save a page; it does not run it automatically on every page.
+- Right-click saves show a system notification with the result; browser or operating system notification settings can affect its visibility.
 
 ## Limits and Pro
 
@@ -43,6 +44,8 @@ SecondShelf is not on the Chrome Web Store yet. To run it from this repo:
 ## Tech
 
 Plain HTML, CSS, and JavaScript — no build step and no dependencies.
+
+Run the regression tests with `node --test tests/*.test.js` (Node.js required).
 
 - `manifest.json` — Manifest V3 definition; the dashboard replaces the new-tab page.
 - `service-worker.js` — saving, sessions, context menu, and storage mutations (serialized so saves can't race each other).

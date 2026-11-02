@@ -1,3 +1,7 @@
+(() => {
+if (globalThis.secondShelfSnippetInstalled) return;
+globalThis.secondShelfSnippetInstalled = true;
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== 'GET_PAGE_SNIPPET') {
     return false;
@@ -77,3 +81,4 @@ function isVisible(element) {
   const style = window.getComputedStyle(element);
   return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
 }
+})();

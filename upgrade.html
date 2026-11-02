@@ -6,6 +6,8 @@
     <title>SecondShelf - Upgrade</title>
     <script src="theme-init.js"></script>
     <style>
+      html:not([data-theme]) { color-scheme: light; background: #fff; }
+      html:not([data-theme]) body { visibility: hidden; }
       :root,
       html[data-theme='day'] {
         color-scheme: light;

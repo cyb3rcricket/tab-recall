@@ -7,12 +7,13 @@ const STORAGE_KEYS = {
 const PAGE_LIMIT = 500;
 const SEARCH_DEBOUNCE_MS = 300;
 const SESSION_RESTORE_CONFIRM_THRESHOLD = 20;
-const FUZZY_SEARCH_PAGE_CAP = 300;
+const restoringSessions = new Set();
 
 const state = {
   pages: [],
   sessions: [],
   filteredPages: [],
+  filteredSessions: [],
   query: '',
   theme: document.documentElement.getAttribute('data-theme') || 'night',
   loading: true,
@@ -126,6 +127,7 @@ async function getStoredThemePreference() {
 function applyTheme(theme) {
   state.theme = theme === 'day' ? 'day' : 'night';
   document.documentElement.setAttribute('data-theme', state.theme);
+  try { localStorage.setItem('theme', state.theme); } catch { /* Storage may be unavailable. */ }
   syncThemeToggle();
 }
 
@@ -396,19 +398,25 @@ async function performBackgroundAction(message) {
 function applySearch() {
   if (!state.query) {
     state.filteredPages = [...state.pages];
+    state.filteredSessions = [...state.sessions];
     return;
   }
 
   const query = normalize(state.query);
+  state.filteredSessions = state.sessions.filter((session) => {
+    const items = Array.isArray(session.items) ? session.items : [];
+    return scorePage(query, {
+      title: session.name,
+      snippet: items.map((item) => `${item?.title || ''} ${item?.url || ''}`).join(' ')
+    }) >= 0.4;
+  });
   const exactMatches = state.pages.filter((page) => pageMatchesQuery(query, page, 1));
   if (exactMatches.length > 0) {
     state.filteredPages = exactMatches;
     return;
   }
 
-  const pagesToSearch =
-    state.pages.length > FUZZY_SEARCH_PAGE_CAP ? state.pages.slice(0, FUZZY_SEARCH_PAGE_CAP) : state.pages;
-  const scored = pagesToSearch
+  const scored = state.pages
     .map((page) => ({
       page,
       score: scorePage(query, page)
@@ -438,15 +446,13 @@ function scorePage(query, page) {
   }
 
   const queryTokens = query.split(' ').filter(Boolean).slice(0, 8);
-  const fieldWords = combined.split(/[^\p{L}\p{N}]+/u).filter(Boolean).slice(0, 40);
+  const fieldWords = combined.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
 
   if (queryTokens.length === 0 || fieldWords.length === 0) {
     return 0;
   }
 
   let total = 0;
-  const useEditDistance = queryTokens.some((token) => token.length >= 4);
-
   for (let index = 0; index < queryTokens.length; index += 1) {
     const token = queryTokens[index];
     let best = 0;
@@ -457,24 +463,23 @@ function scorePage(query, page) {
         break;
       }
 
-      if (word.includes(token) || token.includes(word)) {
+      if (word.includes(token)) {
         best = Math.max(best, 0.92);
         continue;
       }
 
-      const subsequence = subsequenceSimilarity(token, word);
-      const editSimilarity = useEditDistance ? normalizedEditSimilarity(token, word) : 0;
-      best = Math.max(best, subsequence, editSimilarity);
+      const editSimilarity = token.length >= 4 ? normalizedEditSimilarity(token, word) : 0;
+      best = Math.max(best, editSimilarity);
       if (best >= 0.92) {
         break;
       }
     }
 
-    total += best;
-    const remaining = queryTokens.length - index - 1;
-    if ((total + remaining) / queryTokens.length < 0.4) {
-      return total / queryTokens.length;
+    // Every term needs a close match; one matching word must not mask unrelated terms.
+    if (best < 0.75) {
+      return 0;
     }
+    total += best;
   }
 
   return total / queryTokens.length;
@@ -486,7 +491,8 @@ function render() {
 
   elements.pagesCount.textContent = String(pageCount);
   elements.sessionsCount.textContent = String(sessionCount);
-  elements.searchStatus.textContent = `${state.filteredPages.length} result${state.filteredPages.length === 1 ? '' : 's'}`;
+  const resultCount = state.filteredPages.length + state.filteredSessions.length;
+  elements.searchStatus.textContent = `${resultCount} result${resultCount === 1 ? '' : 's'}`;
   elements.storageSummary.textContent = `${pageCount}/${PAGE_LIMIT} page saves used • ${sessionCount} session group${sessionCount === 1 ? '' : 's'}`;
 
   toggleVisibility(elements.upgradeLinkInline, pageCount >= PAGE_LIMIT);
@@ -661,7 +667,10 @@ function renderPages() {
 function renderSessions() {
   elements.sessionGroupsList.innerHTML = '';
 
-  if (state.sessions.length === 0) {
+  if (state.filteredSessions.length === 0) {
+    elements.sessionsEmptyState.textContent = state.query && state.sessions.length
+      ? 'No matching sessions found.'
+      : 'Your grouped tab sessions will appear here.';
     toggleVisibility(elements.sessionsEmptyState, true);
     return;
   }
@@ -669,7 +678,7 @@ function renderSessions() {
   toggleVisibility(elements.sessionsEmptyState, false);
   const fragment = document.createDocumentFragment();
 
-  for (const session of state.sessions) {
+  for (const session of state.filteredSessions) {
     const card = document.createElement('article');
     card.className = 'session-card';
     const isRenaming = state.renamingSessionId === session.id;
@@ -803,6 +812,9 @@ function renderSessions() {
 }
 
 async function restoreSession(session) {
+  if (restoringSessions.has(session.id)) return;
+  restoringSessions.add(session.id);
+  try {
   const items = Array.isArray(session.items) ? session.items : [];
   const restorableCount = items.filter((item) => isSavableUrl(item?.url)).length;
 
@@ -844,6 +856,9 @@ async function restoreSession(session) {
   }
 
   showStatus(`Restored ${opened} tab${opened === 1 ? '' : 's'}.`, false);
+  } finally {
+    restoringSessions.delete(session.id);
+  }
 }
 
 async function openPage(url) {
@@ -912,24 +927,6 @@ function normalize(value) {
     .trim();
 }
 
-function subsequenceSimilarity(query, word) {
-  if (!query || !word) {
-    return 0;
-  }
-
-  let index = 0;
-  let matches = 0;
-
-  while (index < word.length && matches < query.length) {
-    if (word[index] === query[matches]) {
-      matches += 1;
-    }
-    index += 1;
-  }
-
-  return matches / Math.max(query.length, word.length);
-}
-
 function normalizedEditSimilarity(query, word) {
   const maxLength = Math.max(query.length, word.length);
   if (!maxLength) {
@@ -941,7 +938,8 @@ function normalizedEditSimilarity(query, word) {
   }
 
   const distance = levenshtein(query, word);
-  return 1 - distance / maxLength;
+  const maxEdits = query.length >= 8 ? 2 : 1;
+  return distance <= maxEdits ? 1 - distance / maxLength : 0;
 }
 
 function levenshtein(source, target) {

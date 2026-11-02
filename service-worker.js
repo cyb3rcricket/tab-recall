@@ -28,7 +28,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 
   const linkUrl = typeof info.linkUrl === 'string' ? info.linkUrl : '';
   if (linkUrl && !isSavableUrl(linkUrl)) {
-    console.warn('SecondShelf: that link cannot be saved:', linkUrl);
+    notifySaveResult({ ok: false, message: 'This link cannot be saved.' });
     return;
   }
 
@@ -44,14 +44,26 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 
   void enqueueMutation(task)
     .then((result) => {
-      if (!result.ok) {
-        console.warn('SecondShelf save failed:', result.message);
-      }
+      notifySaveResult(result);
     })
     .catch((error) => {
       console.error('Unexpected SecondShelf save error:', error);
+      notifySaveResult({ ok: false, message: 'Something went wrong. Try again.' });
     });
 });
+
+function notifySaveResult(result) {
+  chrome.notifications.create({
+    type: 'basic',
+    iconUrl: 'icons/icon128.png',
+    title: result.ok ? 'SecondShelf: saved' : 'SecondShelf: save failed',
+    message: result.message || 'Something went wrong. Try again.'
+  }, () => {
+    if (chrome.runtime.lastError) {
+      console.warn('SecondShelf notification failed:', chrome.runtime.lastError.message);
+    }
+  });
+}
 
 chrome.action.onClicked.addListener(async () => {
   try {
@@ -149,10 +161,10 @@ async function createSaveMenu() {
 
 async function findDashboardTabs() {
   const recallPageUrl = chrome.runtime.getURL(RECALL_URL);
-  const extensionTabs = await queryTabs({ url: recallPageUrl, currentWindow: true });
+  const extensionTabs = await queryTabs({ url: recallPageUrl });
 
   try {
-    const newTabs = await queryTabs({ url: 'chrome://newtab/*', currentWindow: true });
+    const newTabs = await queryTabs({ url: 'chrome://newtab/*' });
     return [...extensionTabs, ...newTabs];
   } catch (error) {
     console.debug('New tab lookup unavailable:', error);
@@ -254,9 +266,9 @@ async function savePageFromTabId(tabId) {
       url: tab.url,
       domain: getDomain(tab.url),
       snippet,
-      thumbnail,
+      thumbnail: thumbnail.value,
       savedAt: new Date().toISOString()
-    });
+    }, { refreshTitle: Boolean(tab.title?.trim()), thumbnailIsFallback: thumbnail.isFallback });
   } catch (error) {
     console.error('Failed to save page from tab:', error);
     return { ok: false, message: 'Failed to save. Try again.' };
@@ -275,10 +287,10 @@ async function saveLinkedUrl(url, selectionText) {
     snippet: '',
     thumbnail: '',
     savedAt: new Date().toISOString()
-  });
+  }, { refreshTitle: false, thumbnailIsFallback: true });
 }
 
-async function persistPage(page) {
+async function persistPage(page, { refreshTitle = true, thumbnailIsFallback = false } = {}) {
   try {
     const storedPages = await storageGet([STORAGE_KEYS.pages]);
     const existingPages = asArray(storedPages[STORAGE_KEYS.pages]);
@@ -300,10 +312,10 @@ async function persistPage(page) {
       const existingPage = existingPages[existingIndex];
       const refreshedPage = {
         ...existingPage,
-        title: page.title || existingPage.title,
+        title: (refreshTitle && page.title) || existingPage.title || page.title,
         domain: page.domain || existingPage.domain,
         snippet: page.snippet || existingPage.snippet,
-        thumbnail: page.thumbnail,
+        thumbnail: (thumbnailIsFallback && existingPage.thumbnail) || page.thumbnail || existingPage.thumbnail,
         savedAt: page.savedAt
       };
 
@@ -321,7 +333,7 @@ async function persistPage(page) {
 
     return {
       ok: true,
-      message: `${actionLabel}: ${page.title}`,
+      message: `${actionLabel}: ${updatedPages[0].title}`,
       limitReached: false
     };
   } catch (error) {
@@ -433,6 +445,7 @@ async function renameSessionById(sessionId, newName) {
 
 async function getSnippetFromTab(tabId) {
   try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['content-script.js'] });
     const response = await sendMessageToTab(tabId, { type: 'GET_PAGE_SNIPPET' });
     if (response?.snippet) {
       return response.snippet;
@@ -447,7 +460,7 @@ async function getSnippetFromTab(tabId) {
 async function captureVisibleTabThumbnail(tab) {
   const fallback = tab?.favIconUrl || '';
   if (typeof tab?.windowId !== 'number' || tab.active !== true) {
-    return fallback;
+    return { value: fallback, isFallback: true };
   }
 
   try {
@@ -457,13 +470,14 @@ async function captureVisibleTabThumbnail(tab) {
     });
 
     if (!dataUrl) {
-      return fallback;
+      return { value: fallback, isFallback: true };
     }
 
-    return await resizeThumbnailDataUrl(dataUrl, fallback);
+    const value = await resizeThumbnailDataUrl(dataUrl, fallback);
+    return { value, isFallback: value === fallback };
   } catch (error) {
     console.debug('Thumbnail capture unavailable for tab', tab.id, error);
-    return fallback;
+    return { value: fallback, isFallback: true };
   }
 }
 
