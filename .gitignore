@@ -1,2 +1,7 @@
 .DS_Store
 Thumbs.db
+
+# Secrets — never commit real env files (added Nov 9, 2026, Proof of Ship sweep)
+.env
+.env.*
+!.env.example
